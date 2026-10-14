@@ -1,5 +1,7 @@
 streamlit
-plotly
 pandas
-streamlit-mic-recorder
+numpy
 joblib
+scikit-learn
+plotly
+streamlit-mic-recorder
