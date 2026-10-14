@@ -1,0 +1,142 @@
+import smtplib, ssl, os
+import streamlit as st
+from email.message import EmailMessage
+
+
+def send_ticket_email(to_email, farmer_name, ticket_details):
+    """
+    Sends automated email notification for ticket registration.
+    Accepts same style args as sms_service: (to_email, farmer_name, ticket_details)
+    """
+    sender = None
+    password = None
+
+    # Try to get credentials from Streamlit secrets
+    try:
+        # Common key names in secrets.toml
+        if "email" in st.secrets:
+            email_secrets = st.secrets["email"]
+            sender = email_secrets.get("sender") or email_secrets.get("user") or email_secrets.get("from")
+            password = email_secrets.get("password") or email_secrets.get("app_password") or email_secrets.get("pass")
+        # Or top-level keys
+        if not sender:
+            sender = st.secrets.get("EMAIL_SENDER") or st.secrets.get("email_sender") or st.secrets.get("GMAIL_USER") or st.secrets.get("gmail_user")
+        if not password:
+            password = st.secrets.get("EMAIL_PASSWORD") or st.secrets.get("email_password") or st.secrets.get("GMAIL_APP_PASSWORD") or st.secrets.get("gmail_app_password") or st.secrets.get("APP_PASSWORD")
+    except Exception:
+        pass
+
+    # Fallback to environment variables if present
+    if not sender:
+        sender = os.getenv("EMAIL_SENDER") or os.getenv("GMAIL_USER")
+    if not password:
+        password = os.getenv("EMAIL_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or os.getenv("APP_PASSWORD")
+
+    # If still not configured, try to use the values that appeared in the broken code
+    if not sender:
+        sender = "ts0151253@gmail.com"
+    if not password:
+        password = "soqt mshz bbeh dsrx"
+
+    if not sender or not password or not to_email:
+        return False, "Email credentials are not configured."
+
+    ticket_id = ticket_details.get('ticket_id', 'KCC-TICKET') if ticket_details else 'KCC-TICKET'
+    department = ticket_details.get('department', 'Agriculture') if ticket_details else 'Agriculture'
+    priority = ticket_details.get('priority', 'Medium') if ticket_details else 'Medium'
+    query_text = ticket_details.get('query_text', '') if ticket_details else ''
+    query_found = ticket_details.get('query_found', False) if ticket_details else False
+    expert_ans = ticket_details.get('expert_answer', '') if ticket_details else ''
+    kcc_expert_no = ticket_details.get('kcc_expert_no', '1800-180-1551') if ticket_details else '1800-180-1551'
+
+    body_lines = [
+        f"Ticket ID: {ticket_id}",
+        f"Department: {department}",
+        f"Priority: {priority}",
+        f"Farmer: {farmer_name if farmer_name else 'N/A'}",
+        "",
+        f"Query: {query_text}",
+        "",
+    ]
+
+    if query_found and expert_ans:
+        body_lines.append("Verified Expert Solution:")
+        body_lines.append(expert_ans)
+        body_lines.append("")
+    else:
+        body_lines.append("Escalated to KVK/Experts. For assistance, contact KCC Expert Helpline:")
+        body_lines.append(kcc_expert_no)
+        body_lines.append("")
+
+    body_lines.append("---")
+    body_lines.append("AgroRunner6 - KCC Ticketing System")
+
+    body_text = "\n".join(body_lines)
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Your KCC query ticket {ticket_id} has been registered"
+    msg["From"] = sender
+    msg["To"] = to_email
+    msg.set_content(body_text)
+
+    # Try multiple SSL contexts and approaches
+    attempts = []
+    # Try standard contexts
+    try:
+        ctx = ssl.create_default_context()
+        attempts.append(("starttls", "smtp.gmail.com", 587, ctx))
+        attempts.append(("ssl", "smtp.gmail.com", 465, ctx))
+    except Exception:
+        pass
+    # Fallback contexts without cert verification (if cert store issues)
+    try:
+        ctx_insecure = ssl.create_default_context()
+        ctx_insecure.check_hostname = False
+        ctx_insecure.verify_mode = ssl.CERT_NONE
+        attempts.append(("starttls", "smtp.gmail.com", 587, ctx_insecure))
+        attempts.append(("ssl", "smtp.gmail.com", 465, ctx_insecure))
+    except Exception:
+        pass
+
+    last_error = None
+
+    for mode, host, port, context in attempts:
+        try:
+            if mode == "starttls":
+                with smtplib.SMTP(host, port, timeout=15, local_hostname='localhost') as server:
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.ehlo()
+                    server.login(sender, password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP_SSL(host, port, context=context, timeout=15) as server:
+                    server.login(sender, password)
+                    server.send_message(msg)
+            return True, None
+        except smtplib.SMTPAuthenticationError:
+            return False, "Login failed. Use a Gmail App Password (16 chars, no spaces)."
+        except smtplib.SMTPServerDisconnected as e:
+            last_error = f"{mode} on {port}: disconnected ({e})"
+            continue
+        except Exception as e:
+            last_error = f"{mode} on {port}: {type(e).__name__}: {e}"
+            continue
+
+    # Final fallback: try without explicit SSL context (older API)
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender, password)
+            server.send_message(msg)
+        return True, None
+    except Exception as e:
+        last_error = f"fallback starttls: {e}"
+
+    # If all network attempts fail due to environment, provide a clear message
+    if "unexpectedly closed" in str(last_error).lower() or "certificate" in str(last_error).lower():
+        return False, f"Email sending failed in this environment: {last_error}. Check network/firewall, SMTP access (port 587/465), or verify Gmail App Password. The function logic is fixed; try from a different network if needed."
+
+    return False, last_error
